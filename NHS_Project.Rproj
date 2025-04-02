@@ -1,14 +1,161 @@
-Version: 1.0
-ProjectId: 8e688640-342a-41d4-afb2-eb4b4918f6d9
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(showtext)
+library(sysfonts)
+library(ggtext)
 
-RestoreWorkspace: Default
-SaveWorkspace: Default
-AlwaysSaveHistory: Default
+##################### GENERAL DATA CLEANING #####################
+Readmissions <- 
+  read.csv("H:/Professional Goals/R.Programming/Practice Project - Biostats/I02040 Compendium Readmissions Dataset (Main) 2024 v2.csv")
 
-EnableCodeIndexing: Yes
-UseSpacesForTab: Yes
-NumSpacesForTab: 2
-Encoding: UTF-8
+Readmissions2024 <- Readmissions %>%
+  filter(Year == "2023/24")
 
-RnwWeave: Sweave
-LaTeX: pdfLaTeX
+#Ensure values are numeric
+Readmissions2024$Indicator.value <- 
+  as.numeric(Readmissions2024$Indicator.value)
+Readmissions2024$Numerator <- 
+  as.numeric(Readmissions2024$Numerator)
+Readmissions2024$Denominator <-
+  as.numeric(Readmissions2024$Denominator)
+Readmissions2024$Lower.CI..95.. <- 
+  as.numeric(Readmissions2024$Lower.CI..95..)
+Readmissions2024$Upper.CI..95.. <-
+  as.numeric(Readmissions2024$Upper.CI..95..)
+
+#Only include England Region and non-overlapping areas
+Readmissions2024_Demographics <- Readmissions2024 %>%
+  filter(Breakdown == "England",
+         Age.Breakdown !="16+")
+
+Readmissions2024_Sex <- Readmissions2024 %>%                  
+  filter(Sex.Breakdown %in% c("Male", "Female"),
+         Age.Breakdown == "All")
+
+Readmissions2024_Sex2 <- Readmissions2024 %>%
+  filter(Breakdown == "England",
+         Sex.Breakdown %in% c("Male", "Female"),
+         Age.Breakdown == "All")
+
+#Filter out demographic breakdowns -                                 NEEDED?
+Readmissions2024_All <- Readmissions2024 %>%
+  filter(Sex.Breakdown == "Persons",
+         Age.Breakdown == "All")
+
+######################## SEX DEMOGRAPHICS - TABLE 1 ############################
+Readmissions_Contingency <- Readmissions2024_Sex2 %>%
+  filter(Sex.Breakdown %in% c("Male", "Female")) %>%
+  select(Sex.Breakdown, Numerator, Denominator) %>%
+  group_by(Sex.Breakdown) %>%
+  summarise(
+    Readmitted = sum(Numerator, na.rm = TRUE),
+    Total_Pop = sum(Denominator, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+Readmission_Matrix <- 
+  as.matrix(Readmissions_Contingency[,2:3])
+
+Readmissions_Z_Sex <- prop.test(x = Readmission_Matrix[, "Readmitted"], 
+                                n = Readmission_Matrix[, "Total_Pop"], 
+                                alternative = "two.sided", 
+                                correct = FALSE)
+
+########################## INTERACTION MODEL - TABLE 2 ###########################
+Readmissions2024_Quint <- Readmissions2024_Sex %>%
+  filter(Breakdown == "Deprivation quintile",
+         Level.description != "No IMD lookup")
+
+Readmissions_Contingency_Quint <- Readmissions2024_Quint %>%
+  select(Sex.Breakdown, Level.description, Numerator, Denominator) %>%
+  mutate(Denominator = Denominator - Numerator)  # Calculate Not Readmitted, so now Denominator = Not_Readmitted
+
+# Convert to long format by expanding counts
+Readmissions_Long_Quint <- Readmissions_Contingency_Quint %>%
+  pivot_longer(cols = c(Denominator, Numerator), 
+               names_to = "Readmission_Status", 
+               values_to = "Count") %>%
+  mutate(Readmission_Status = ifelse(Readmission_Status == "Numerator", 1, 0)) %>%
+  uncount(Count)
+
+model_interaction <- glm(Readmission_Status ~ Level.description * Sex.Breakdown, 
+                         family = binomial, 
+                         data = Readmissions_Long_Quint)
+summary(model_interaction)
+
+########################## STRATIFIED LOGISTIC REGRESSION - TABLE 3 ###########################
+
+# Stratify by sex (logistic regression of quintiles)
+glm_model_male <- Readmissions_Long_Quint %>%
+  filter(Sex.Breakdown == "Male") %>%
+  glm(Readmission_Status ~ factor(Level.description), 
+      data = ., 
+      family = binomial)
+#Viewing Male Data
+summary(glm_model_male)
+exp(coef(glm_model_male))                 #OR
+exp(confint(glm_model_male))              #OR for CI
+
+glm_model_female <- Readmissions_Long_Quint %>%
+  filter(Sex.Breakdown == "Female") %>%
+  glm(Readmission_Status ~ factor(Level.description), 
+      data = ., 
+      family = binomial)
+
+#Viewing Female Data
+summary(glm_model_female)
+exp(coef(glm_model_female))               #OR
+exp(confint(glm_model_female))            #OR for CI
+
+########################## FIGURE 2 ###########################
+
+extract_ORs <- function(model, sex) {
+  ORs <- exp(coef(model))
+  CIs <- exp(confint(model))
+  
+  data.frame(
+    Level.description = names(ORs)[-1],  # Exclude intercept
+    OR = ORs[-1],                       # Exclude intercept
+    Lower_CI = CIs[-1, 1],               # Lower bound
+    Upper_CI = CIs[-1, 2],               # Upper bound
+    Sex = sex
+  )
+}
+
+# Extract ORs for males
+ORs_male <- Readmissions_Long_Quint %>%
+  filter(Sex.Breakdown == "Male") %>%
+  glm(Readmission_Status ~ factor(Level.description), data = ., family = binomial) %>%
+  extract_ORs(sex = "Male")
+
+# Extract ORs for females
+ORs_female <- Readmissions_Long_Quint %>%
+  filter(Sex.Breakdown == "Female") %>%
+  glm(Readmission_Status ~ factor(Level.description), data = ., family = binomial) %>%
+  extract_ORs(sex = "Female")
+
+# Combine into a single data frame
+ORs_combined <- bind_rows(ORs_male, ORs_female) %>%
+  mutate(IMD_Group = c("IMD Group 2", "IMD Group 3", "IMD Group 4", 
+                       "IMD Group 5 (Least Deprived)", "IMD Group 2", 
+                       "IMD Group 3", "IMD Group 4", "IMD Group 5 (Least Deprived)"))
+
+#Create Plot
+font_add_google("Space Grotesk", "space_grotesk")
+showtext_auto()  # Enable the custom font in plots
+
+ggplot(ORs_combined, aes(x = IMD_Group, y = OR, color = Sex, group = Sex)) +
+  geom_line(size = 1) +                     # Line for each gender
+  geom_point(color = "#13325d", size = 3) +                     # Points for OR estimates
+  geom_errorbar(aes(ymin = Lower_CI, ymax = Upper_CI), width = 0.2) +  # CI error bars
+  theme_minimal() +
+  labs(x = "Deprivation Quintile",
+       y = "Odds Ratio (OR)",
+       color = "Sex") +
+  scale_y_continuous(trans = "log") +  # Log-scale for ORs to avoid skewness
+  theme(
+    text = element_text(family = "space_grotesk"),
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Tilt x-axis labels
+    plot.title = element_text(hjust = 0.5)             # Center title
+  )
