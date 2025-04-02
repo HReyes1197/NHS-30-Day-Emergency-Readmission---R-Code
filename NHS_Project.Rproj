@@ -38,7 +38,7 @@ Readmissions2024_Sex2 <- Readmissions2024 %>%
          Sex.Breakdown %in% c("Male", "Female"),
          Age.Breakdown == "All")
 
-#Filter out demographic breakdowns -                                 NEEDED?
+#Filter out demographic breakdowns -                                 
 Readmissions2024_All <- Readmissions2024 %>%
   filter(Sex.Breakdown == "Persons",
          Age.Breakdown == "All")
